@@ -24,18 +24,78 @@ const OAUTH_CLIENT_ID = process.env.OAUTH_CLIENT_ID || "mcp-server";
 const OAUTH_CLIENT_SECRET = process.env.OAUTH_CLIENT_SECRET || "";
 
 const app = express();
-app.use(express.json());
+// Parse JSON and capture raw body for logging
+app.use(express.json({
+  verify: (req: any, _res, buf) => {
+    try {
+      req.rawBody = buf?.toString() ?? '';
+    } catch {
+      req.rawBody = '';
+    }
+  }
+}));
 
 // CORS configuration
 app.use(cors({
   origin: '*', // Configure appropriately for production
   exposedHeaders: ['Mcp-Session-Id'],
-  allowedHeaders: ['Content-Type', 'mcp-session-id', 'Authorization'],
 }));
+
+// Request logger: logs every request with full headers and body (no redaction)
+app.use((req: any, res: any, next) => {
+  const start = Date.now();
+
+  // Capture response body by wrapping write/end
+  const chunks: Buffer[] = [];
+  const originalWrite = res.write.bind(res);
+  const originalEnd = res.end.bind(res);
+
+  res.write = ((chunk: any, ...args: any[]) => {
+    try {
+      if (chunk !== undefined && chunk !== null) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+    } catch {}
+    return originalWrite(chunk, ...args);
+  }) as typeof res.write;
+
+  res.end = ((chunk?: any, ...args: any[]) => {
+    try {
+      if (chunk !== undefined && chunk !== null) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      res.locals.__responseBody = Buffer.concat(chunks).toString('utf8');
+    } catch {}
+    return originalEnd(chunk, ...args);
+  }) as typeof res.end;
+
+  res.on('finish', () => {
+    const durationMs = Date.now() - start;
+    const length = res.get('Content-Length') ?? '-';
+    const base = `${req.method} ${req.originalUrl} ${res.statusCode} ${length}b - ${durationMs}ms`;
+    console.log(base);
+
+    // Log request headers and body
+    console.log('Request Headers:', req.headers);
+    const reqBodyStr = (typeof req.rawBody === 'string' && req.rawBody.length > 0)
+      ? req.rawBody
+      : (typeof req.body === 'string' ? req.body : (req.body != null ? JSON.stringify(req.body) : ''));
+    console.log('Request Body:', reqBodyStr);
+
+    // Log response headers and body
+    try {
+      console.log('Response Headers:', res.getHeaders());
+    } catch {}
+    const respBodyStr = typeof res.locals?.__responseBody === 'string' ? res.locals.__responseBody : '';
+    console.log('Response Body:', respBodyStr);
+  });
+  next();
+});
 
 // Set up OAuth
 const mcpServerUrl = new URL(`http://${HOST}:${PORT}`);
-const authServerUrl = new URL(`http://${AUTH_HOST}:${AUTH_PORT}/realms/${AUTH_REALM}`);
+// Important: ensure trailing slash so relative URLs resolve under the realm (not drop it)
+const authServerUrl = new URL(`http://${AUTH_HOST}:${AUTH_PORT}/realms/${AUTH_REALM}/`);
 const strictOAuth = false; // Set to true if you want strict resource checking
 
 const oauthMetadata: OAuthMetadata = {
@@ -48,9 +108,11 @@ const oauthMetadata: OAuthMetadata = {
 
 const tokenVerifier = {
   verifyAccessToken: async (token: string) => {
+    console.log('[auth] verifyAccessToken called');
     const endpoint = oauthMetadata.introspection_endpoint;
 
     if (!endpoint) {
+      console.error('[auth] no introspection endpoint in metadata');
       throw new Error('No token verification endpoint available in metadata');
     }
 
@@ -61,26 +123,66 @@ const tokenVerifier = {
     if (OAUTH_CLIENT_SECRET) {
       params.set('client_secret', OAUTH_CLIENT_SECRET);
     }
+    const tokenPreview = typeof token === 'string' ? `${token.slice(0, 12)}... (${token.length} chars)` : '<non-string>';
+    console.log('[auth] introspection request', { endpoint, clientId: OAUTH_CLIENT_ID, hasClientSecret: !!OAUTH_CLIENT_SECRET, tokenPreview });
 
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: params.toString()
-    });
-
-    if (!response.ok) {
-      throw new Error(`Invalid or expired token: ${await response.text()}`);
+    let response: Response;
+    try {
+      response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: params.toString()
+      });
+    } catch (e) {
+      console.error('[auth] introspection fetch threw', e);
+      throw e;
     }
 
-    const data = await response.json();
+    if (!response.ok) {
+      const txt = await response.text();
+      console.error('[auth] introspection non-OK', { status: response.status });
+      console.log('');
+      // Print the JSON (or raw text) body on its own line for readability
+      try {
+        // Try to pretty-print JSON if possible
+        const obj = JSON.parse(txt);
+        console.error(JSON.stringify(obj, null, 2));
+      } catch {
+        console.error(txt);
+      }
+      console.log('');
+      throw new Error(`Invalid or expired token: ${txt}`);
+    }
+
+    let data: any;
+    try {
+      data = await response.json();
+    } catch (e) {
+      const txt = await response.text();
+      console.error('[auth] failed to parse introspection JSON', { error: String(e), body: txt });
+      throw e;
+    }
+    try {
+      console.log('[auth] introspection response', {
+        active: data?.active,
+        aud: data?.aud,
+        client_id: data?.client_id,
+        scope: data?.scope,
+        exp: data?.exp,
+      });
+    } catch {}
 
     if (strictOAuth) {
+      console.log('[auth] strictOAuth enabled');
       if (!data.aud) {
+        console.error('[auth] strictOAuth: missing aud');
         throw new Error(`Resource Indicator (RFC8707) missing`);
       }
-      if (!checkResourceAllowed({ requestedResource: data.aud, configuredResource: mcpServerUrl })) {
+      const allowed = checkResourceAllowed({ requestedResource: data.aud, configuredResource: mcpServerUrl });
+      console.log('[auth] strictOAuth resource check', { requested: data.aud, configured: mcpServerUrl.toString(), allowed });
+      if (!allowed) {
         throw new Error(`Expected resource indicator ${mcpServerUrl}, got: ${data.aud}`);
       }
     }
@@ -207,7 +309,6 @@ const handleSessionRequest = async (req: express.Request, res: express.Response)
   await transport.handleRequest(req, res);
 };
 
-// Set up routes with auth middleware
 app.post('/', authMiddleware, mcpPostHandler);
 app.get('/', authMiddleware, handleSessionRequest);
 app.delete('/', authMiddleware, handleSessionRequest);
