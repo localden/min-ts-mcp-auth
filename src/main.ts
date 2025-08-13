@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from "express";
 import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -10,7 +11,17 @@ import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middlew
 import { OAuthMetadata } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { checkResourceAllowed } from "@modelcontextprotocol/sdk/shared/auth-utils.js";
 
-const PORT = process.env.PORT || 3000;
+// Config: centralize host/port to avoid repeating literals
+const HOST = process.env.HOST || "localhost";
+const PORT = Number(process.env.PORT) || 3000;
+
+const AUTH_HOST = process.env.AUTH_HOST || HOST;
+const AUTH_PORT = Number(process.env.AUTH_PORT) || 8080;
+const AUTH_REALM = process.env.AUTH_REALM || "master";
+
+// OAuth client credentials (from .env)
+const OAUTH_CLIENT_ID = process.env.OAUTH_CLIENT_ID || "mcp-server";
+const OAUTH_CLIENT_SECRET = process.env.OAUTH_CLIENT_SECRET || "";
 
 const app = express();
 app.use(express.json());
@@ -23,15 +34,15 @@ app.use(cors({
 }));
 
 // Set up OAuth
-const mcpServerUrl = new URL(`http://localhost:${PORT}`);
-const authServerUrl = new URL(`http://localhost:8080/realms/master`);
+const mcpServerUrl = new URL(`http://${HOST}:${PORT}`);
+const authServerUrl = new URL(`http://${AUTH_HOST}:${AUTH_PORT}/realms/${AUTH_REALM}`);
 const strictOAuth = false; // Set to true if you want strict resource checking
 
 const oauthMetadata: OAuthMetadata = {
-  issuer: authServerUrl.href,
-  introspection_endpoint: `${authServerUrl.href}/protocol/openid-connect/token/introspect`,
-  authorization_endpoint: `${authServerUrl.href}/protocol/openid-connect/auth`,
-  token_endpoint: `${authServerUrl.href}/protocol/openid-connect/token`,
+  issuer: authServerUrl.toString(),
+  introspection_endpoint: new URL("protocol/openid-connect/token/introspect", authServerUrl).toString(),
+  authorization_endpoint: new URL("protocol/openid-connect/auth", authServerUrl).toString(),
+  token_endpoint: new URL("protocol/openid-connect/token", authServerUrl).toString(),
   response_types_supported: ["code"],
 };
 
@@ -43,16 +54,20 @@ const tokenVerifier = {
       throw new Error('No token verification endpoint available in metadata');
     }
 
+    const params = new URLSearchParams({
+      token: token,
+      client_id: OAUTH_CLIENT_ID,
+    });
+    if (OAUTH_CLIENT_SECRET) {
+      params.set('client_secret', OAUTH_CLIENT_SECRET);
+    }
+
     const response = await fetch(endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
       },
-      body: new URLSearchParams({
-        token: token,
-        client_id: 'mcp-server', // Replace with your actual client ID
-        client_secret: 'WfDimJZECxPNWi2FLZGmpcvypFmQRKut' // Replace with your actual client secret
-      }).toString()
+      body: params.toString()
     });
 
     if (!response.ok) {
@@ -198,7 +213,7 @@ app.get('/', authMiddleware, handleSessionRequest);
 app.delete('/', authMiddleware, handleSessionRequest);
 
 app.listen(PORT, () => {
-  console.log(`🚀 MCP Server running on http://localhost:${PORT}`);
-  console.log(`📡 MCP endpoint available at http://localhost:${PORT}/mcp`);
-  console.log(`🔐 OAuth metadata available at http://localhost:${PORT}/.well-known/oauth-authorization-server`);
+  console.log(`🚀 MCP Server running on ${mcpServerUrl.origin}`);
+  console.log(`📡 MCP endpoint available at ${mcpServerUrl.origin}`);
+  console.log(`🔐 OAuth metadata available at ${getOAuthProtectedResourceMetadataUrl(mcpServerUrl)}`);
 });
