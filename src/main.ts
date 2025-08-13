@@ -1,6 +1,6 @@
 /**
- * EXPERIMENTAL: TypeScript MCP Server with OAuth Authentication
- * This implementation is experimental and subject to change.
+ * EXPERIMENTAL: TypeScript MCP Server with OAuth-based authorization via Keycloak.
+ * For demo purposes only.
  */
 
 import 'dotenv/config';
