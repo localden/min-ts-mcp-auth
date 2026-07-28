@@ -1,4 +1,4 @@
- 
+
 import 'dotenv/config';
 import express from "express";
 import { randomUUID } from "node:crypto";
@@ -80,11 +80,10 @@ const tokenVerifier = {
       token: token,
       client_id: CONFIG.auth.clientId,
     });
-    
+
     if (CONFIG.auth.clientSecret) {
       params.set('client_secret', CONFIG.auth.clientSecret);
     }
-    
 
     let response: Response;
     try {
@@ -103,7 +102,7 @@ const tokenVerifier = {
     if (!response.ok) {
       const txt = await response.text();
       console.error('[auth] introspection non-OK', { status: response.status });
-      
+
       try {
         const obj = JSON.parse(txt);
         console.log(JSON.stringify(obj, null, 2));
@@ -121,7 +120,6 @@ const tokenVerifier = {
       console.error('[auth] failed to parse introspection JSON', { error: String(e), body: txt });
       throw e;
     }
-    
 
     if (data.active === false) {
       throw new Error('Inactive token');
@@ -132,7 +130,15 @@ const tokenVerifier = {
     }
 
     const audiences: string[] = Array.isArray(data.aud) ? data.aud : [data.aud];
-    const allowed = audiences.some(a => checkResourceAllowed({ requestedResource: a, configuredResource: mcpServerUrl }));
+    const allowed = audiences.some((a) => {
+      try {
+        return checkResourceAllowed({ requestedResource: a, configuredResource: mcpServerUrl });
+      } catch {
+        // Keycloak tokens include non-URL audiences (e.g. "account", "test-client").
+        // Those are never our resource, so treat them as "no match" instead of crashing.
+        return false;
+      }
+    });
     if (!allowed) {
       throw new Error(`None of the provided audiences are allowed. Expected ${mcpServerUrl}, got: ${audiences.join(', ')}`);
     }
@@ -170,9 +176,9 @@ function createMcpServer() {
     {
       title: "Addition Tool",
       description: "Add two numbers together",
-      inputSchema: { 
-        a: z.number().describe("First number to add"), 
-        b: z.number().describe("Second number to add") 
+      inputSchema: {
+        a: z.number().describe("First number to add"),
+        b: z.number().describe("Second number to add")
       }
     },
     async ({ a, b }) => ({
@@ -182,7 +188,7 @@ function createMcpServer() {
 
   server.registerTool("multiply",
     {
-      title: "Multiplication Tool", 
+      title: "Multiplication Tool",
       description: "Multiply two numbers together",
       inputSchema: {
         x: z.number().describe("First number to multiply"),
@@ -240,7 +246,7 @@ const handleSessionRequest = async (req: express.Request, res: express.Response)
     res.status(400).send('Invalid or missing session ID');
     return;
   }
-  
+
   const transport = transports[sessionId];
   await transport.handleRequest(req, res);
 };
@@ -249,7 +255,7 @@ app.post('/', authMiddleware, mcpPostHandler);
 app.get('/', authMiddleware, handleSessionRequest);
 app.delete('/', authMiddleware, handleSessionRequest);
 
-app.listen(CONFIG.port, () => {
+app.listen(CONFIG.port, CONFIG.host, () => {
   console.log(`🚀 MCP Server running on ${mcpServerUrl.origin}`);
   console.log(`📡 MCP endpoint available at ${mcpServerUrl.origin}`);
   console.log(`🔐 OAuth metadata available at ${getOAuthProtectedResourceMetadataUrl(mcpServerUrl)}`);
